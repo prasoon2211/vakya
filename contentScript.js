@@ -24,6 +24,7 @@
   let translatorLanguages = null; // Store language pair for lazy init
   let isModifierHeld = false;
   let hoveredSentence = null;
+  let lastMousePosition = { x: 0, y: 0 };
 
   // Initialize
   function init() {
@@ -60,24 +61,42 @@
       return;
     }
 
-    const articleRoot = findArticleRoot();
-    if (!articleRoot) {
+    // 1. Use Readability to extract article text (identifies WHAT to translate)
+    const articleData = extractWithReadability();
+    if (!articleData) {
       showOverlay('error', 'No content found', 'Navigate to an article page with readable content.');
       return;
     }
 
-    const paragraphs = collectParagraphs(articleRoot);
-    if (paragraphs.elements.length === 0) {
-      showOverlay('error', 'No readable content', 'This page doesn\'t have enough text to translate.');
+    console.log('[Vakya] Readability extracted:', articleData.title, '- Length:', articleData.length);
+
+    // 2. Parse Readability's HTML to get text blocks
+    const textBlocks = extractTextBlocksFromReadability(articleData.content);
+    if (textBlocks.length === 0) {
+      showOverlay('error', 'No readable content', 'Could not extract text from this page.');
       return;
     }
 
-    showOverlay('loading', 'Translating...', `Processing ${paragraphs.texts.length} paragraphs`);
+    console.log('[Vakya] Extracted', textBlocks.length, 'text blocks from Readability');
+
+    // 3. Find matching elements in the ORIGINAL page (search by text content)
+    const originalElements = findOriginalElementsByText(textBlocks);
+    if (originalElements.length === 0) {
+      showOverlay('error', 'Could not match content', 'Unable to locate article text in page.');
+      return;
+    }
+
+    console.log('[Vakya] Matched', originalElements.length, 'elements in original page');
+
+    showOverlay('loading', 'Translating...', `Processing ${originalElements.length} paragraphs`);
+
+    // 4. Get the text from original elements (might differ slightly from Readability)
+    const textsToTranslate = originalElements.map(el => el.textContent.trim());
 
     try {
-      const response = await chrome.runtime.sendMessage({
+      const response = await sendMessageWithRetry({
         type: 'translate-blocks',
-        payload: { blocks: paragraphs.texts }
+        payload: { blocks: textsToTranslate }
       });
 
       if (!response?.ok) {
@@ -86,7 +105,9 @@
 
       hideOverlay();
       const { blocks, failedBatches, totalBatches } = response.result;
-      applyTranslations(paragraphs.elements, blocks);
+
+      // 5. Apply translations IN-PLACE to original elements
+      applyTranslations(originalElements, blocks);
 
       // Store language pair for lazy browser translator init (requires user gesture)
       const settings = await getSettings();
@@ -98,13 +119,128 @@
 
       // Show success message with warning if some batches failed
       if (failedBatches > 0) {
-        showFloatingBar(`Translated ${paragraphs.elements.length} paragraphs (${failedBatches}/${totalBatches} batches failed - some text unchanged)`, 'warning');
+        showFloatingBar(`Translated ${originalElements.length} paragraphs (${failedBatches}/${totalBatches} batches failed - some text unchanged)`, 'warning');
       } else {
-        showFloatingBar(`Translated ${paragraphs.elements.length} paragraphs`, 'success');
+        showFloatingBar(`Translated ${originalElements.length} paragraphs`, 'success');
       }
     } catch (error) {
       handleTranslationError(error);
     }
+  }
+
+  // Extract article content using Readability
+  function extractWithReadability() {
+    try {
+      // Clone the document so Readability doesn't modify the original
+      const documentClone = document.cloneNode(true);
+
+      const reader = new Readability(documentClone);
+      const article = reader.parse();
+
+      if (!article || !article.content || article.length < 100) {
+        console.log('[Vakya] Readability could not extract article');
+        return null;
+      }
+
+      return article;
+    } catch (err) {
+      console.error('[Vakya] Readability error:', err);
+      return null;
+    }
+  }
+
+  // Parse Readability's HTML output to get text blocks
+  function extractTextBlocksFromReadability(htmlContent) {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(htmlContent, 'text/html');
+
+    const elements = doc.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, blockquote');
+    return Array.from(elements)
+      .map(el => el.textContent.trim())
+      .filter(text => text.length > 30); // Skip very short blocks
+  }
+
+  // Find elements in the original page that contain the target text
+  function findOriginalElementsByText(textBlocks) {
+    const found = [];
+    const usedElements = new Set();
+
+    // Build a list of candidate elements from the original page
+    const candidates = document.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, blockquote, td, th, figcaption, div, span');
+
+    for (const targetText of textBlocks) {
+      const normalizedTarget = normalizeText(targetText);
+      let bestMatch = null;
+      let bestScore = 0;
+
+      for (const el of candidates) {
+        if (usedElements.has(el)) continue;
+
+        // Skip elements that are containers of other block elements
+        if (isContainerElement(el)) continue;
+
+        const elText = normalizeText(el.textContent);
+
+        // Exact match
+        if (elText === normalizedTarget) {
+          bestMatch = el;
+          bestScore = 1;
+          break;
+        }
+
+        // Fuzzy match - check if text is substantially similar
+        const similarity = textSimilarity(elText, normalizedTarget);
+        if (similarity > 0.85 && similarity > bestScore) {
+          bestMatch = el;
+          bestScore = similarity;
+        }
+      }
+
+      if (bestMatch) {
+        found.push(bestMatch);
+        usedElements.add(bestMatch);
+        // Also mark ancestors to avoid matching parent containers later
+        let parent = bestMatch.parentElement;
+        while (parent && parent !== document.body) {
+          usedElements.add(parent);
+          parent = parent.parentElement;
+        }
+      }
+    }
+
+    return found;
+  }
+
+  // Check if element is a container (has block-level children with text)
+  function isContainerElement(el) {
+    const blockTags = ['P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'LI', 'BLOCKQUOTE', 'DIV', 'ARTICLE', 'SECTION'];
+    for (const child of el.children) {
+      if (blockTags.includes(child.tagName) && child.textContent.trim().length > 30) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Normalize text for comparison
+  function normalizeText(text) {
+    return text.replace(/\s+/g, ' ').trim().toLowerCase();
+  }
+
+  // Simple text similarity (Jaccard-like on words)
+  function textSimilarity(a, b) {
+    const wordsA = new Set(a.split(/\s+/).filter(w => w.length > 2));
+    const wordsB = new Set(b.split(/\s+/).filter(w => w.length > 2));
+
+    if (wordsA.size === 0 || wordsB.size === 0) return 0;
+
+    let intersection = 0;
+    for (const word of wordsA) {
+      if (wordsB.has(word)) intersection++;
+    }
+
+    const union = wordsA.size + wordsB.size - intersection;
+    return intersection / union;
   }
 
   // Handle translation errors
@@ -142,9 +278,7 @@
 
       renderTranslatedBlock(el, block.translated || block.original);
 
-      // Add sentence mode handlers
-      el.addEventListener('mouseenter', handleSentenceEnter);
-      el.addEventListener('mouseleave', handleSentenceLeave);
+      // Add sentence mode click handler
       el.addEventListener('click', handleSentenceClick);
     }
 
@@ -154,24 +288,7 @@
     };
   }
 
-  // Sentence mode handlers (when Cmd/Ctrl is held)
-  function handleSentenceEnter(event) {
-    if (!isModifierHeld) return;
-    const el = event.currentTarget;
-    clearSentenceHover();
-    hoveredSentence = el;
-    el.classList.add('vakya-sentence-hover');
-  }
-
-  function handleSentenceLeave(event) {
-    if (!isModifierHeld) return;
-    const el = event.currentTarget;
-    el.classList.remove('vakya-sentence-hover');
-    if (hoveredSentence === el) {
-      hoveredSentence = null;
-    }
-  }
-
+  // Sentence mode click handler (when Cmd/Ctrl is held)
   function handleSentenceClick(event) {
     if (!isModifierHeld) return;
     event.preventDefault();
@@ -376,17 +493,19 @@
     const vh = window.innerHeight;
 
     // Position below the word by default
-    let left = wordRect.left + window.scrollX;
-    let top = wordRect.bottom + window.scrollY + padding;
+    // Note: getBoundingClientRect gives viewport-relative coords, and position:fixed
+    // is also viewport-relative, so we don't add scroll offsets
+    let left = wordRect.left;
+    let top = wordRect.bottom + padding;
 
     // If tooltip goes off right edge, align to right edge of word
     if (left + tooltipRect.width > vw - padding) {
-      left = wordRect.right + window.scrollX - tooltipRect.width;
+      left = wordRect.right - tooltipRect.width;
     }
 
     // If tooltip goes off bottom, position above the word
     if (wordRect.bottom + tooltipRect.height + padding > vh) {
-      top = wordRect.top + window.scrollY - tooltipRect.height - padding;
+      top = wordRect.top - tooltipRect.height - padding;
     }
 
     // Ensure minimum padding from edges
@@ -404,28 +523,6 @@
     currentClickedWord = null;
   }
 
-  // Analyze word via API (no button, direct call)
-  async function analyzeWord(span) {
-    const word = span.dataset.word || span.textContent;
-    const context = span.closest('[data-vakya-context]')?.dataset.vakyaContext || '';
-
-    try {
-      const settings = await getSettings();
-      const response = await chrome.runtime.sendMessage({
-        type: 'analyze-word',
-        payload: { word, context, settings }
-      });
-
-      if (response?.ok && response.result) {
-        updateTooltipWithAnalysis(word, response.result);
-      } else {
-        throw new Error(response?.error || 'Analysis failed');
-      }
-    } catch (err) {
-      updateTooltipWithError(word, err.message);
-    }
-  }
-
   // Analyze word via API (with button loading state)
   async function analyzeWordWithButton(span) {
     const btn = document.getElementById('vakya-analyze-btn');
@@ -439,7 +536,7 @@
 
     try {
       const settings = await getSettings();
-      const response = await chrome.runtime.sendMessage({
+      const response = await sendMessageWithRetry({
         type: 'analyze-word',
         payload: { word, context, settings }
       });
@@ -598,9 +695,7 @@
     if (!translationState) return;
 
     translationState.elements.forEach((el, i) => {
-      // Remove event listeners before restoring
-      el.removeEventListener('mouseenter', handleSentenceEnter);
-      el.removeEventListener('mouseleave', handleSentenceLeave);
+      // Remove event listener before restoring
       el.removeEventListener('click', handleSentenceClick);
 
       el.textContent = translationState.originals[i] || '';
@@ -620,39 +715,18 @@
     setTimeout(hideFloatingBar, 2000);
   }
 
-  // DOM helpers
-  function findArticleRoot() {
-    return document.querySelector('article') 
-      || document.querySelector('main') 
-      || document.querySelector('[role="main"]') 
-      || document.querySelector('[role="article"]')
-      || document.body;
-  }
-
-  function collectParagraphs(root) {
-    const selectors = [
-      'article p', 'article li', 'article h1', 'article h2', 'article h3', 'article h4',
-      'main p', 'main li', 'main h1', 'main h2', 'main h3', 'main h4',
-      '[role="main"] p', '[role="article"] p'
-    ].join(', ');
-
-    let elements = Array.from(root.querySelectorAll(selectors))
-      .filter(el => (el.textContent || '').trim().length > 40);
-
-    // Fallback
-    if (elements.length === 0) {
-      elements = Array.from(document.querySelectorAll('p, h1, h2, h3'))
-        .filter(el => (el.textContent || '').trim().length > 40);
-    }
-
-    return {
-      elements,
-      texts: elements.map(el => el.textContent.trim())
-    };
-  }
-
   // Global listeners for closing tooltip and modifier keys
   function attachGlobalListeners() {
+    // Track mouse position for sentence mode
+    document.addEventListener('mousemove', (e) => {
+      lastMousePosition = { x: e.clientX, y: e.clientY };
+
+      // If modifier is held, update hover state as mouse moves
+      if (isModifierHeld) {
+        updateSentenceHoverAtPoint(e.clientX, e.clientY);
+      }
+    });
+
     // Close tooltip when clicking outside
     document.addEventListener('click', (e) => {
       if (activeTooltip && !activeTooltip.contains(e.target) && !e.target.closest('.vakya-word') && !e.target.closest('.vakya-translated')) {
@@ -669,6 +743,8 @@
       if ((e.key === 'Meta' || e.key === 'Control') && !isModifierHeld) {
         isModifierHeld = true;
         document.body.classList.add('vakya-sentence-mode');
+        // Immediately check what's under the cursor
+        updateSentenceHoverAtPoint(lastMousePosition.x, lastMousePosition.y);
       }
     });
 
@@ -686,6 +762,28 @@
       document.body.classList.remove('vakya-sentence-mode');
       clearSentenceHover();
     });
+  }
+
+  // Find translated element at point and apply hover
+  function updateSentenceHoverAtPoint(x, y) {
+    const el = document.elementFromPoint(x, y);
+    if (!el) {
+      clearSentenceHover();
+      return;
+    }
+
+    // Find the translated paragraph (could be the element itself or an ancestor)
+    const translatedEl = el.closest('.vakya-translated');
+
+    if (translatedEl) {
+      if (hoveredSentence !== translatedEl) {
+        clearSentenceHover();
+        hoveredSentence = translatedEl;
+        translatedEl.classList.add('vakya-sentence-hover');
+      }
+    } else {
+      clearSentenceHover();
+    }
   }
 
   function clearSentenceHover() {
@@ -806,6 +904,26 @@
   }
 
   // Utilities
+
+  // Wrapper for chrome.runtime.sendMessage that retries on connection failure
+  async function sendMessageWithRetry(message, retries = 2) {
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        const response = await chrome.runtime.sendMessage(message);
+        return response;
+      } catch (err) {
+        const isConnectionError = err.message?.includes('Could not establish connection') ||
+                                   err.message?.includes('Receiving end does not exist');
+        if (isConnectionError && attempt < retries) {
+          console.log(`[Vakya] Connection failed, retrying (${attempt + 1}/${retries})...`);
+          await new Promise(r => setTimeout(r, 100 * (attempt + 1))); // Small delay before retry
+          continue;
+        }
+        throw err;
+      }
+    }
+  }
+
   function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text || '';

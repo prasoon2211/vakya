@@ -132,7 +132,7 @@ async function translateBatch(blocks, settings, apiKey, batchNum, totalBatches) 
         messages: [
           {
             role: "system",
-            content: "Translate the text blocks. Return JSON with 'blocks' array: [{ original, translated }]."
+            content: "Translate the numbered text blocks. Return JSON with 'blocks' array: [{ original, translated }]. Do NOT include the #1:, #2: etc. prefixes in your translations - just the translated text."
           },
           { role: "user", content: prompt }
         ]
@@ -159,8 +159,13 @@ async function translateBatch(blocks, settings, apiKey, batchNum, totalBatches) 
     }
 
     const parsed = JSON.parse(content);
-    console.log(`[Vakya] Batch ${batchNum}/${totalBatches} DONE - got ${parsed.blocks?.length} translated blocks`);
-    return { blocks: parsed.blocks || [], failed: false };
+    // Strip any #N: prefixes that the LLM might have included
+    const cleanedBlocks = (parsed.blocks || []).map(block => ({
+      original: block.original,
+      translated: (block.translated || '').replace(/^#\d+:\s*/, '')
+    }));
+    console.log(`[Vakya] Batch ${batchNum}/${totalBatches} DONE - got ${cleanedBlocks.length} translated blocks`);
+    return { blocks: cleanedBlocks, failed: false };
   } catch (error) {
     clearTimeout(timeout);
     console.error(`[Vakya] Batch ${batchNum}/${totalBatches} FAILED - ${error.name}: ${error.message}`);
