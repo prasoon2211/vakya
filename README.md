@@ -12,26 +12,54 @@ A Chrome extension for language learners that translates articles and provides w
 
 ## Installation
 
-1. Clone this repository
-2. Go to `chrome://extensions/`
-3. Enable "Developer mode" (top right)
-4. Click "Load unpacked" and select this folder
-5. Click the extension icon and add your OpenAI API key in settings
+### Step 1: Download the Extension
 
-## Requirements
+```bash
+git clone https://github.com/YOUR_USERNAME/vakya.git
+```
 
-- Chrome 141+ (for built-in Translator API)
-- OpenAI API key (for deep word analysis)
-- Enable `chrome://flags/#translation-api` for instant word translations
+Or download as ZIP and extract.
+
+### Step 2: Load in Chrome
+
+1. Open Chrome and go to `chrome://extensions/`
+2. Enable **Developer mode** (toggle in top right corner)
+3. Click **Load unpacked**
+4. Select the `vakya` folder you downloaded
+
+### Step 3: Enable Chrome Translator API (Optional but Recommended)
+
+For instant word translations without API calls:
+
+1. Go to `chrome://flags/#translation-api`
+2. Set "Experimental translation API" to **Enabled**
+3. Restart Chrome
+4. Go to `chrome://on-device-translation-internals/`
+5. Install language packs for your language pair (e.g., German → English)
+
+### Step 4: Add OpenAI API Key
+
+1. Click the Vakya extension icon in your toolbar
+2. Click **Settings**
+3. Enter your [OpenAI API key](https://platform.openai.com/api-keys)
+4. Configure your native language, target language, and CEFR level
+5. Click **Save**
 
 ## Usage
 
-1. Navigate to any article
-2. Click the Vakya extension icon
-3. Click "Translate Page"
-4. Click any word to see its translation
-5. Click "Analyze Word" for detailed grammar info
-6. Hold Cmd/Ctrl + click a paragraph to see the original text
+| Action | Result |
+|--------|--------|
+| Click extension → "Translate Page" | Translates the article to your target language |
+| Click on any word | Shows translation (instant if Translator API enabled) |
+| Click "Analyze Word" | Fetches grammar, examples, usage from OpenAI |
+| Cmd/Ctrl + hover paragraph | Highlights the whole paragraph |
+| Cmd/Ctrl + click paragraph | Shows original text |
+| Click "Restore" in floating bar | Restores original page content |
+
+## Requirements
+
+- **Chrome 141+** (for built-in Translator API)
+- **OpenAI API key** (for deep word analysis feature)
 
 ## Tech Stack
 
