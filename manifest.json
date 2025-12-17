@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Vakya",
+  "version": "0.1.0",
+  "description": "Language learning assistant. Translate articles and hover words for meanings, grammar, and examples.",
+  "permissions": ["storage", "activeTab", "scripting"],
+  "host_permissions": ["https://api.openai.com/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Vakya - Translate for learning"
+  },
+  "options_page": "options.html",
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["contentScript.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
