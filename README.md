@@ -15,7 +15,7 @@ A Chrome extension for language learners that translates articles and provides w
 ### Step 1: Download the Extension
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/vakya.git
+git clone https://github.com/prasoon2211/vakya.git
 ```
 
 Or download as ZIP and extract.
